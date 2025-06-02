@@ -156,10 +156,7 @@ app.get('/chat/messages', async (req, res) => {
         next()
       })
     }
-
-
-
-
+//Chat access
 app.get('/chat/access/:email', async (req, res) => {
   const { email } = req.params;
 
