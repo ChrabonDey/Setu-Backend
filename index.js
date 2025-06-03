@@ -1,7 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
+
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const http = require('http'); // <-- ✅ Required for socket.io
@@ -138,6 +140,34 @@ app.get('/chat/messages', async (req, res) => {
 });
 
 
+// GET /chat/access-job/:jobId
+app.get('/chat/access-job/:jobId', async (req, res) => {
+  const { jobId } = req.params;
+
+  try {
+    const application = await applyJobsCollection.findOne({
+      jobId,
+      status: 'accepted'
+    });
+
+    if (!application) {
+      return res.status(403).send({ access: false, message: 'No accepted chat found for this job' });
+    }
+
+    const { jobPosterEmail, applicantEmail } = application;
+    return res.send({
+      access: true,
+      jobPosterEmail,
+      applicantEmail
+    });
+  } catch (error) {
+    console.error('Chat access check failed:', error);
+    return res.status(500).send({ access: false, message: 'Internal server error' });
+  }
+});
+
+
+
     app.post('/jwt',async(req,res)=>{
       const user=req.body;
       const token= jwt.sign(user,process.env.ACCESS_TOKEN_SECRET,{expiresIn:'1h'});
@@ -156,31 +186,8 @@ app.get('/chat/messages', async (req, res) => {
         next()
       })
     }
-//Chat access
-app.get('/chat/access/:email', async (req, res) => {
-  const { email } = req.params;
 
-  try {
-    // Look for any accepted application where the user is either poster or applicant
-    const acceptedApplication = await applyJobsCollection.findOne({
-      status: 'accepted',
-      $or: [
-        { applicantEmail: email },
-        { jobPosterEmail: email }
-      ]
-    });
 
-    if (!acceptedApplication) {
-      return res.status(403).send({ access: false, message: 'No accepted chat found for this user' });
-    }
-
-    // Return jobId for frontend to use in message loading
-    return res.send({ access: true, jobId: acceptedApplication.jobId });
-  } catch (error) {
-    console.error('Chat access check failed:', error);
-    return res.status(500).send({ access: false, message: 'Internal server error' });
-  }
-});
 
 
 
@@ -215,14 +222,42 @@ app.get('/mention-users', async (req, res) => {
         return res.send({ message: 'User already exists', insertedId: null });
       }
 
-      const result = await usersCollection.insertOne({
-        ...userData,
-        Email: email,
-        role: 'user',
-        timestamp: new Date(),
-      });
+     const result = await usersCollection.insertOne({
+  ...userData,
+  Email: email,
+  role: 'user',
+  timestamp: new Date(),
+ credits: 25 // Initial coins
+});
       res.send(result);
     });
+
+app.get('/user/:email', async (req, res) => {
+  const email = req.params.email;
+  const user = await usersCollection.findOne({ Email: email });
+
+  if (!user) return res.status(404).send({ message: 'User not found' });
+
+  res.send({ credits: user.credits }); // Make sure it's 'credits'
+});
+
+
+// PATCH /user/credit/:email
+app.patch('/user/credit/:email', async (req, res) => {
+  const email = req.params.email;
+  const { amount } = req.body; // positive for add, negative for deduct
+
+const user = await usersCollection.findOne({ Email: email });
+if (!user) return res.status(404).send({ message: 'User not found' });
+
+if (user. credits+ amount < 0) {
+  return res.status(400).send({ message: 'Insufficient credits' });
+}
+
+
+  res.send(result);
+});
+
 
     // ✅ Create profile
   app.post('/profile-data', async (req, res) => {
@@ -373,6 +408,129 @@ app.post('/apply-jobs', async (req, res) => {
     res.status(500).send({ error: "Failed to apply for job" });
   }
 });
+const transporter = nodemailer.createTransport({
+  service: 'Gmail',
+  auth: {
+   user: process.env.EMAIL_USER,
+pass: process.env.EMAIL_PASS,
+ // use environment variable or app password
+  },
+});
+
+app.patch('/submit-task', async (req, res) => {
+  const { applicantEmail, jobId, submissionStatus, submissionLink } = req.body;
+
+  if (!applicantEmail || !jobId || !submissionStatus || !submissionLink) {
+    return res.status(400).send({ error: 'All fields are required' });
+  }
+
+  try {
+    // Update the application with submission info
+    await applyJobsCollection.updateOne(
+      { applicantEmail, jobId },
+      { $set: { submissionStatus, submissionLink } }
+    );
+
+    // Fetch application to get the jobPosterEmail
+    const application = await applyJobsCollection.findOne({ applicantEmail, jobId });
+    if (!application || !application.jobPosterEmail) {
+      return res.status(404).send({ error: 'Job poster not found' });
+    }
+
+    // Prepare email
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: application.jobPosterEmail,
+      subject: 'Task Submission Received',
+      html: `
+        <p><strong>Applicant:</strong> ${applicantEmail}</p>
+        <p><strong>Status:</strong> ${submissionStatus}</p>
+        <p><strong>Link:</strong> <a href="${submissionLink}" target="_blank">${submissionLink}</a></p>
+      `,
+    };
+
+    // Send email
+    await transporter.sendMail(mailOptions);
+
+    res.send({ message: 'Submission saved and email sent successfully' });
+  } catch (error) {
+    console.error('Submission error:', error);
+    res.status(500).send({ error: 'Internal server error' });
+  }
+});
+// GET /my-accepted-tasks?email=user@example.com
+app.get('/my-accepted-tasks', async (req, res) => {
+  const email = req.query.email;
+
+  try {
+    const tasks = await applyJobsCollection.find({
+      applicantEmail: email,
+      submissionStatus: { $exists: false }  // Only get tasks not submitted
+    }).toArray();
+
+    res.send(tasks);
+  } catch (err) {
+    console.error('Error fetching tasks:', err);
+    res.status(500).send({ error: 'Failed to fetch tasks' });
+  }
+});
+app.post('/reward-applicant', async (req, res) => {
+  try {
+    const { jobPosterEmail, applicantEmail, credits, jobId } = req.body;
+
+    // Deduct from job poster
+    const posterResult = await usersCollection.updateOne(
+      { Email: jobPosterEmail }, // Capital "E"
+      { $inc: { credits: -credits } }
+    );
+
+    // Add to applicant
+    const applicantResult = await usersCollection.updateOne(
+      { Email: applicantEmail },
+      { $inc: { credits: credits } }
+    );
+
+    // Mark the application as paid
+    const paymentResult = await applyJobsCollection.updateOne(
+      { jobId, applicantEmail },
+      { $set: { paymentStatus: 'paid' } }
+    );
+
+    if (
+      posterResult.modifiedCount === 0 ||
+      applicantResult.modifiedCount === 0 ||
+      paymentResult.modifiedCount === 0
+    ) {
+      return res.status(400).send({ message: 'Failed to update one or more records.' });
+    }
+
+    res.send({ message: 'Credits transferred successfully without session.' });
+  } catch (error) {
+    console.error('Error in /reward-applicant:', error);
+    res.status(500).send({ error: 'Internal server error' });
+  }
+});
+
+
+app.get('/my-posted-tasks', async (req, res) => {
+  const { email } = req.query;
+  if (!email) {
+    return res.status(400).send({ error: 'Email is required' });
+  }
+
+  try {
+    const tasks = await applyJobsCollection
+      .find({ jobPosterEmail: email, submissionStatus: 'completed', paymentStatus: { $ne: 'paid' } })
+      .toArray();
+
+    res.send(tasks);
+  } catch (err) {
+    console.error('Error fetching posted tasks:', err);
+    res.status(500).send({ error: 'Failed to fetch tasks' });
+  }
+});
+
+
 app.get('/apply-jobs', async (req, res) => {
   const posterEmail = req.query.posterEmail;
 
@@ -429,6 +587,7 @@ app.get('/apply-jobs', async (req, res) => {
     console.error("❌ MongoDB connection failed:", err);
   }
 }
+
 
 
 
