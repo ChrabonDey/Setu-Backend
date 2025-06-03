@@ -138,6 +138,34 @@ app.get('/chat/messages', async (req, res) => {
 });
 
 
+// GET /chat/access-job/:jobId
+app.get('/chat/access-job/:jobId', async (req, res) => {
+  const { jobId } = req.params;
+
+  try {
+    const application = await applyJobsCollection.findOne({
+      jobId,
+      status: 'accepted'
+    });
+
+    if (!application) {
+      return res.status(403).send({ access: false, message: 'No accepted chat found for this job' });
+    }
+
+    const { jobPosterEmail, applicantEmail } = application;
+    return res.send({
+      access: true,
+      jobPosterEmail,
+      applicantEmail
+    });
+  } catch (error) {
+    console.error('Chat access check failed:', error);
+    return res.status(500).send({ access: false, message: 'Internal server error' });
+  }
+});
+
+
+
     app.post('/jwt',async(req,res)=>{
       const user=req.body;
       const token= jwt.sign(user,process.env.ACCESS_TOKEN_SECRET,{expiresIn:'1h'});
@@ -156,31 +184,8 @@ app.get('/chat/messages', async (req, res) => {
         next()
       })
     }
-//Chat access
-app.get('/chat/access/:email', async (req, res) => {
-  const { email } = req.params;
 
-  try {
-    // Look for any accepted application where the user is either poster or applicant
-    const acceptedApplication = await applyJobsCollection.findOne({
-      status: 'accepted',
-      $or: [
-        { applicantEmail: email },
-        { jobPosterEmail: email }
-      ]
-    });
 
-    if (!acceptedApplication) {
-      return res.status(403).send({ access: false, message: 'No accepted chat found for this user' });
-    }
-
-    // Return jobId for frontend to use in message loading
-    return res.send({ access: true, jobId: acceptedApplication.jobId });
-  } catch (error) {
-    console.error('Chat access check failed:', error);
-    return res.status(500).send({ access: false, message: 'Internal server error' });
-  }
-});
 
 
 
